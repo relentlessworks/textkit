@@ -1,0 +1,95 @@
+name: Tag & Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tagged: ${{ steps.tag.outputs.tagged }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(cat VERSION)
+          echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+      - name: Check if tag exists
+        id: tag
+        run: |
+          if git rev-parse "refs/tags/v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "tagged=false" >> $GITHUB_OUTPUT
+          else
+            echo "tagged=true" >> $GITHUB_OUTPUT
+          fi
+      - name: Create tag
+        if: steps.tag.outputs.tagged == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+  cross-compile:
+    needs: tag
+    runs-on: ubuntu-latest
+    if: needs.tag.outputs.tagged == 'true'
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          ext=""
+          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+          go build -trimpath -ldflags "-s -w" -o textkit-${GOOS}-${GOARCH}${ext} ./cmd/textkit
+          tar czf textkit-${GOOS}-${GOARCH}.tar.gz textkit-${GOOS}-${GOARCH}${ext} README.md LICENSE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: textkit-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: textkit-*.tar.gz
+
+  release:
+    needs: [tag, cross-compile]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+          cat checksums.txt
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.tag.outputs.version }}"
+          echo "Creating release $VERSION"
+          gh release create "$VERSION" dist/*.tar.gz dist/checksums.txt \
+            --title "$VERSION" \
+            --notes "Release $VERSION" \
+            --repo "$GITHUB_REPOSITORY"

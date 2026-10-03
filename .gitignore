@@ -1,0 +1,8 @@
+/textkit
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+.env
